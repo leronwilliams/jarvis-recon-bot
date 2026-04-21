@@ -201,10 +201,11 @@ HELP_TEXT = (
     "```\n"
     "!help                         Show this help\n"
     "!status                       Agent heartbeat + service state\n"
-    "!report today                 Signals in the last 24h\n"
-    "!report week                  Signals in the last 7 days\n"
+    "!report today                 Signals today (operator-local time)\n"
+    "!report week                  Signals in the last 7 local days\n"
     "!report health                Host + stack health snapshot\n"
-    "!report account <id>          30-day history for one account\n"
+    "!report falsealarm            False-alarm history (disabled stub)\n"
+    "!report account <id>          30-day history for one AcctNum\n"
     "!query <SQL>                  Run a read-only query (safety gated)\n"
     "```"
 )
@@ -360,6 +361,9 @@ class JarvisReconBot(discord.Client):
             payload = {}
         elif parsed.subcommand == "health":
             task_type = "report.health"
+            payload = {}
+        elif parsed.subcommand == "falsealarm":
+            task_type = "report.falsealarm"
             payload = {}
         elif parsed.subcommand == "account":
             task_type = "report.account"

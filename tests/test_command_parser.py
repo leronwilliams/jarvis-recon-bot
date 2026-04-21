@@ -19,12 +19,18 @@ def test_status_parses():
     assert (p.command, p.subcommand, p.args) == ("status", None, {})
 
 
-@pytest.mark.parametrize("sub", ["today", "week", "health"])
+@pytest.mark.parametrize("sub", ["today", "week", "health", "falsealarm"])
 def test_report_simple_subcommands(sub):
     p = parse(f"!report {sub}")
     assert p.command == "report"
     assert p.subcommand == sub
     assert p.args == {}
+
+
+def test_help_lists_falsealarm_subcommand():
+    """Guard for CP9.2: !report falsealarm is on the allow-list."""
+    from command_parser import KNOWN_REPORT_SUBCOMMANDS
+    assert "falsealarm" in KNOWN_REPORT_SUBCOMMANDS
 
 
 def test_report_account_numeric():

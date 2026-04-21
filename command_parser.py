@@ -18,7 +18,7 @@ class NotACommand(Exception):
 
 PREFIX = "!"
 KNOWN_COMMANDS = {"help", "status", "report", "query"}
-KNOWN_REPORT_SUBCOMMANDS = {"today", "week", "health", "account"}
+KNOWN_REPORT_SUBCOMMANDS = {"today", "week", "health", "falsealarm", "account"}
 
 # Maps a !query SQL statement to the whitelisted task_type the agent will
 # dispatch it under. We only sniff the dominant FROM-clause table.
@@ -79,12 +79,12 @@ def parse(raw_message: str) -> ParsedCommand:
 
     if cmd == "report":
         if len(tokens) < 2:
-            raise ParseError("usage: !report today|week|health|account <id>")
+            raise ParseError("usage: !report today|week|health|falsealarm|account <id>")
         sub = tokens[1].lower()
         if sub not in KNOWN_REPORT_SUBCOMMANDS:
             raise ParseError(
                 f"unknown report: {sub!r}. "
-                "try: today | week | health | account <id>"
+                "try: today | week | health | falsealarm | account <id>"
             )
         if sub == "account":
             rest = tokens[2] if len(tokens) > 2 else ""
