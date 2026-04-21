@@ -1,0 +1,17 @@
+[Unit]
+Description=Jarvis Recon Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/jarvis-recon-bot
+ExecStart=/opt/jarvis-recon-bot/.venv/bin/python -u /opt/jarvis-recon-bot/bot.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
