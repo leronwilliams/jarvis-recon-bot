@@ -7,6 +7,8 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/opt/jarvis-recon-bot
+Environment=OPENCLAW_AGENT=recon
+Environment=OBSERVATORY_EMIT=/root/observatory/hooks/observatory-emit.sh
 ExecStart=/opt/jarvis-recon-bot/.venv/bin/python -u /opt/jarvis-recon-bot/bot.py
 Restart=on-failure
 RestartSec=10

@@ -17,8 +17,10 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 
 import discord
@@ -35,6 +37,40 @@ from command_parser import (
 
 
 CONFIG_PATH = os.environ.get("JRB_CONFIG", "/opt/jarvis-recon-bot/config.ini")
+OBSERVATORY_EMIT = os.environ.get(
+    "OBSERVATORY_EMIT", "/root/observatory/hooks/observatory-emit.sh")
+
+
+def _emit_sync(event_type: str, title: str, body: str, level: str,
+               trace_id: str, tool: str) -> None:
+    """Blocking emit — never raises. Run via asyncio.to_thread from async paths."""
+    if not os.path.isfile(OBSERVATORY_EMIT):
+        return
+    env = os.environ.copy()
+    if trace_id:
+        env["OPENCLAW_TRACE_ID"] = trace_id
+    if tool:
+        env["OPENCLAW_TOOL"] = tool
+    try:
+        subprocess.run(
+            [OBSERVATORY_EMIT, event_type, title[:200], (body or "")[:4000], level],
+            env=env, timeout=5, check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def emit(event_type: str, title: str, *, body: str = "", level: str = "info",
+         trace_id: str = "", tool: str = "") -> None:
+    """Fire-and-forget observatory event. Won't block the bot's event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _emit_sync(event_type, title, body, level, trace_id, tool)
+        return
+    loop.create_task(asyncio.to_thread(
+        _emit_sync, event_type, title, body, level, trace_id, tool))
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +301,8 @@ class JarvisReconBot(discord.Client):
         await self.change_presence(activity=discord.Activity(
             type=discord.ActivityType.watching, name="jarvis-recon"))
         logging.info("Connected as %s (id=%s)", self.user, self.user.id)
+        emit("prompt", "recon bot online",
+             body=f"connected as {self.user} (id={self.user.id})")
         if self.allowed_channel_id:
             ch = self.get_channel(self.allowed_channel_id)
             if ch:
@@ -303,6 +341,9 @@ class JarvisReconBot(discord.Client):
         except NotACommand:
             return
         except ParseError as e:
+            emit("error", "command parse error",
+                 body=f"input: {msg.content[:200]}\nerror: {e}",
+                 level="warn")
             await msg.reply(f"⚠️ {e}")
             return
 
@@ -312,34 +353,47 @@ class JarvisReconBot(discord.Client):
                 f"attempted command {msg.content[:80]!r}\n"
             )
             sys.stderr.flush()
+            emit("error", "unauthorized user",
+                 body=f"user={msg.author} ({msg.author.id}) cmd={msg.content[:120]}",
+                 level="warn")
             await msg.reply("🔒 Not authorized. Ask Ron to add your user ID.")
             return
 
         _audit_cmd(self.neon_uri, msg.author.id, str(msg.author),
                    msg.content, msg.channel.id, msg.id)
 
+        trace = uuid.uuid4().hex[:12]
+        emit("prompt", f"!{parsed.command}" + (f" {parsed.subcommand}" if parsed.subcommand else ""),
+             body=f"from {msg.author} in channel {msg.channel.id}\nraw: {msg.content[:300]}",
+             trace_id=trace)
+
         if parsed.command == "help":
             await msg.reply(HELP_TEXT)
+            emit("reply", "help posted", trace_id=trace)
             return
         if parsed.command == "status":
-            await self._handle_status(msg)
+            await self._handle_status(msg, trace_id=trace)
             return
         if parsed.command == "report":
-            await self._dispatch_report(msg, parsed)
+            await self._dispatch_report(msg, parsed, trace_id=trace)
             return
         if parsed.command == "query":
-            await self._dispatch_query(msg, parsed)
+            await self._dispatch_query(msg, parsed, trace_id=trace)
             return
 
     # -- command handlers ------------------------------------------------
 
-    async def _handle_status(self, msg: discord.Message):
+    async def _handle_status(self, msg: discord.Message, *, trace_id: str = ""):
         try:
             hb = await asyncio.to_thread(_latest_agent_heartbeat, self.neon_uri)
         except Exception as e:
+            emit("error", "status check failed", body=str(e),
+                 level="error", trace_id=trace_id)
             await msg.reply(f"❌ Status check failed: `{e}`")
             return
         if not hb:
+            emit("reply", "no agent heartbeat (>5m)",
+                 body="monitoring PC may be down", level="warn", trace_id=trace_id)
             await msg.reply(
                 "⚠️ No agent heartbeat in the last 5 minutes. "
                 "The jarvis-recon service on the monitoring PC may be down."
@@ -347,12 +401,16 @@ class JarvisReconBot(discord.Client):
             return
         now = datetime.now(timezone.utc)
         age = int((now - hb["ts"]).total_seconds())
+        emit("reply", f"heartbeat OK ({age}s ago)",
+             body=f"host={hb['agent_host']} type={hb['event_type']}\n{hb['message'][:300]}",
+             trace_id=trace_id)
         await msg.reply(
             f"🟢 Agent `{hb['agent_host']}` last heartbeat {age}s ago\n"
             f"> `{hb['event_type']}`: {hb['message'][:180]}"
         )
 
-    async def _dispatch_report(self, msg: discord.Message, parsed: ParsedCommand):
+    async def _dispatch_report(self, msg: discord.Message, parsed: ParsedCommand,
+                               *, trace_id: str = ""):
         if parsed.subcommand == "today":
             task_type = "report.today"
             payload = {}
@@ -369,24 +427,36 @@ class JarvisReconBot(discord.Client):
             task_type = "report.account"
             payload = dict(parsed.args)
         else:
+            emit("error", f"unknown report subcommand: {parsed.subcommand}",
+                 level="warn", trace_id=trace_id)
             await msg.reply(f"⚠️ unknown report subcommand: {parsed.subcommand}")
             return
-        await self._enqueue_and_wait(msg, task_type, payload, formatter=_format_report_result)
+        await self._enqueue_and_wait(msg, task_type, payload,
+                                     formatter=_format_report_result,
+                                     trace_id=trace_id)
 
-    async def _dispatch_query(self, msg: discord.Message, parsed: ParsedCommand):
+    async def _dispatch_query(self, msg: discord.Message, parsed: ParsedCommand,
+                              *, trace_id: str = ""):
         task_type = parsed.args.pop("task_type")
         await self._enqueue_and_wait(msg, task_type, parsed.args,
-                                     formatter=_format_query_result)
+                                     formatter=_format_query_result,
+                                     trace_id=trace_id)
 
-    async def _enqueue_and_wait(self, msg, task_type, payload, formatter):
+    async def _enqueue_and_wait(self, msg, task_type, payload, formatter,
+                                *, trace_id: str = ""):
         try:
             task_id = await asyncio.to_thread(
                 _enqueue_task, self.neon_uri, task_type, payload,
                 msg.channel.id, msg.id,
             )
         except Exception as e:
+            emit("error", "queue insert failed", body=str(e),
+                 level="error", trace_id=trace_id, tool=task_type)
             await msg.reply(f"❌ Queue insert failed: `{e}`")
             return
+        emit("tool_use", f"task enqueued: {task_type}",
+             body=f"task_id={task_id} payload={json.dumps(payload)[:300]}",
+             trace_id=trace_id, tool=task_type)
 
         status = await msg.reply(
             f"⏳ Queued `{task_type}` (id: `{task_id[:8]}…`)")
@@ -398,6 +468,8 @@ class JarvisReconBot(discord.Client):
             try:
                 row = await asyncio.to_thread(_fetch_task, self.neon_uri, task_id)
             except Exception as e:
+                emit("error", "task poll failed", body=str(e),
+                     level="error", trace_id=trace_id, tool=task_type)
                 await status.edit(content=f"❌ Poll failed: `{e}`")
                 return
             if row and row["status"] in ("completed", "failed"):
@@ -408,9 +480,15 @@ class JarvisReconBot(discord.Client):
                 except Exception:
                     pass
                 if row["status"] == "failed":
+                    emit("error", f"task failed: {task_type}",
+                         body=f"error={error}\nelapsed={int(time.time()-start)}s",
+                         level="error", trace_id=trace_id, tool=task_type)
                     await status.edit(content=f"❌ `{task_type}` failed: `{error}`")
                     return
                 body = formatter(result)
+                elapsed_s = int(time.time() - start)
+                emit("reply", f"task complete: {task_type} ({elapsed_s}s)",
+                     body=body, trace_id=trace_id, tool=task_type)
                 if len(body) > 1500:
                     buf = io.BytesIO(body.encode("utf-8"))
                     await status.edit(content=f"✅ `{task_type}` complete (attached)")
@@ -423,6 +501,9 @@ class JarvisReconBot(discord.Client):
 
             elapsed = time.time() - start
             if elapsed > self.task_timeout:
+                emit("error", f"task timeout: {task_type}",
+                     body=f"timed out after {self.task_timeout}s (task_id={task_id})",
+                     level="error", trace_id=trace_id, tool=task_type)
                 await status.edit(
                     content=f"⏰ `{task_type}` timed out after {self.task_timeout}s "
                             f"(id: `{task_id[:8]}…`). Agent may be overloaded.")
